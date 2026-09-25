@@ -58,7 +58,7 @@
 
     <section id="uploadPanel" class="upload-area" hidden>
       <h2>Upload videos</h2>
-      <p>MP4, WebM, OGG, MOV, M4V, or MKV. Maximum 500 MB per file.</p>
+      <p>MP4, WebM, OGG, MOV, M4V, or MKV. Maximum 100 MB per file.</p>
       <input id="videoUpload" type="file" accept="video/*" multiple>
       <button id="chooseVideo" type="button">Choose videos</button>
     </section>
@@ -95,7 +95,7 @@
       ownerForm.querySelector('button[type="submit"]').hidden = enabled;
     }
 
-    function createVideoCard(videoUrl) {
+    function createVideoCard(video) {
       const card = document.createElement('article');
       card.className = 'video-card';
 
@@ -105,7 +105,7 @@
       player.playsInline = true;
 
       const source = document.createElement('source');
-      source.src = videoUrl;
+      source.src = video.url;
       player.append(source);
 
       const info = document.createElement('div');
@@ -120,7 +120,7 @@
         deleteButton.type = 'button';
         deleteButton.className = 'danger';
         deleteButton.textContent = 'Delete';
-        deleteButton.addEventListener('click', () => deleteVideo(videoUrl));
+        deleteButton.addEventListener('click', () => deleteVideo(video.name));
         info.append(deleteButton);
       }
 
@@ -143,13 +143,13 @@
       }
     }
 
-    async function deleteVideo(videoUrl) {
+    async function deleteVideo(videoName) {
       if (!window.confirm('Delete this video permanently?')) {
         return;
       }
 
       try {
-        const response = await fetch(videoUrl, {
+        const response = await fetch(`/videos/${encodeURIComponent(videoName)}`, {
           method: 'DELETE',
           headers: ownerHeaders()
         });

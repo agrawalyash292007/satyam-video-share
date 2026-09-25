@@ -2,14 +2,18 @@ services:
   - type: web
     name: satyam-video-share
     runtime: node
-    plan: 0.5c-512mb
+    plan: free
     buildCommand: npm ci
     startCommand: npm start
     healthCheckPath: /
     envVars:
+      - key: NODE_ENV
+        value: production
       - key: OWNER_KEY
         sync: false
-    disk:
-      name: video-uploads
-      mountPath: /opt/render/project/src/uploads
-      sizeGB: 1
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false
+      - key: SUPABASE_BUCKET
+        value: videos
