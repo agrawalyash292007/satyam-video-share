@@ -1,0 +1,263 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Video Share</title>
+  <style>
+    :root { color-scheme: dark; font-family: system-ui, sans-serif; }
+    * { box-sizing: border-box; }
+    body { margin: 0; min-height: 100vh; background: #0a0a0f; color: #e8e8ef; }
+    button, input { font: inherit; }
+    button { cursor: pointer; }
+    [hidden] { display: none !important; }
+    .container { width: min(960px, calc(100% - 2rem)); margin: 0 auto; padding: 2rem 0 4rem; }
+    h1 { margin: 0; font-size: clamp(1.8rem, 4vw, 2.5rem); }
+    h2 { margin: 0 0 0.5rem; font-size: 1.1rem; }
+    .subtitle, .helper-text { color: #a7a7b7; }
+    .subtitle { margin: 0.6rem 0 1.5rem; }
+    .owner-panel, .upload-area { border: 1px solid #303044; border-radius: 12px; background: #161620; padding: 1.25rem; }
+    .owner-panel { margin-bottom: 1rem; }
+    .owner-form { display: flex; flex-wrap: wrap; gap: 0.65rem; margin-top: 1rem; }
+    .owner-form input { min-width: 0; flex: 1 1 220px; }
+    input { width: 100%; border: 1px solid #3a3a50; border-radius: 8px; background: #0f0f17; color: #fff; padding: 0.75rem 0.85rem; }
+    input:focus { border-color: #8b5cf6; outline: 2px solid transparent; box-shadow: 0 0 0 2px #8b5cf6; }
+    button { border: 0; border-radius: 8px; padding: 0.75rem 1rem; background: #7c3aed; color: #fff; font-weight: 600; }
+    button:hover { filter: brightness(1.1); }
+    button:disabled { cursor: wait; opacity: 0.6; }
+    .secondary { background: #2d2d40; }
+    .danger { background: #b42318; }
+    .upload-area { margin-bottom: 1rem; text-align: center; }
+    .upload-area p { margin: 0.4rem 0 1rem; color: #a7a7b7; }
+    #videoUpload { display: none; }
+    .message { min-height: 1.4rem; margin: 1rem 0; color: #86efac; }
+    .message.error { color: #fda4af; }
+    .video-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 1rem; }
+    .video-card { overflow: hidden; border: 1px solid #262636; border-radius: 10px; background: #12121a; }
+    .video-card video { display: block; width: 100%; aspect-ratio: 16 / 9; background: #000; }
+    .video-info { display: flex; align-items: center; justify-content: space-between; gap: 0.75rem; padding: 0.8rem; color: #b7b7c5; }
+    .empty-state { padding: 3rem 1rem; border: 1px dashed #343449; border-radius: 10px; color: #858597; text-align: center; }
+    .visually-hidden { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+  </style>
+</head>
+<body>
+  <main class="container">
+    <h1>Video Share</h1>
+    <p class="subtitle">Anyone can watch. Only the owner can upload or delete videos.</p>
+
+    <section class="owner-panel" aria-labelledby="owner-heading">
+      <h2 id="owner-heading">Owner access</h2>
+      <p class="helper-text">Enter your private key to manage videos.</p>
+      <form id="ownerForm" class="owner-form">
+        <label class="visually-hidden" for="ownerKey">Owner key</label>
+        <input id="ownerKey" type="password" autocomplete="current-password" required>
+        <button type="submit">Unlock</button>
+        <button id="lockOwner" class="secondary" type="button" hidden>Exit owner mode</button>
+      </form>
+    </section>
+
+    <section id="uploadPanel" class="upload-area" hidden>
+      <h2>Upload videos</h2>
+      <p>MP4, WebM, OGG, MOV, M4V, or MKV. Maximum 500 MB per file.</p>
+      <input id="videoUpload" type="file" accept="video/*" multiple>
+      <button id="chooseVideo" type="button">Choose videos</button>
+    </section>
+
+    <p id="message" class="message" role="status" aria-live="polite"></p>
+    <section id="videoGrid" class="video-grid" aria-label="Uploaded videos"></section>
+    <p id="emptyState" class="empty-state">No videos uploaded yet.</p>
+  </main>
+
+  <script>
+    const ownerForm = document.getElementById('ownerForm');
+    const ownerKeyInput = document.getElementById('ownerKey');
+    const lockOwnerButton = document.getElementById('lockOwner');
+    const uploadPanel = document.getElementById('uploadPanel');
+    const videoInput = document.getElementById('videoUpload');
+    const chooseVideoButton = document.getElementById('chooseVideo');
+    const message = document.getElementById('message');
+    const videoGrid = document.getElementById('videoGrid');
+    const emptyState = document.getElementById('emptyState');
+    let ownerKey = sessionStorage.getItem('ownerKey') || '';
+
+    function ownerHeaders() {
+      return ownerKey ? { 'X-Owner-Key': ownerKey } : {};
+    }
+
+    function showMessage(text = '', isError = false) {
+      message.textContent = text;
+      message.classList.toggle('error', isError);
+    }
+
+    function setOwnerMode(enabled) {
+      uploadPanel.hidden = !enabled;
+      lockOwnerButton.hidden = !enabled;
+      ownerForm.querySelector('button[type="submit"]').hidden = enabled;
+    }
+
+    function createVideoCard(videoUrl) {
+      const card = document.createElement('article');
+      card.className = 'video-card';
+
+      const player = document.createElement('video');
+      player.controls = true;
+      player.preload = 'metadata';
+      player.playsInline = true;
+
+      const source = document.createElement('source');
+      source.src = videoUrl;
+      player.append(source);
+
+      const info = document.createElement('div');
+      info.className = 'video-info';
+
+      const label = document.createElement('span');
+      label.textContent = 'Ready to watch';
+      info.append(label);
+
+      if (ownerKey) {
+        const deleteButton = document.createElement('button');
+        deleteButton.type = 'button';
+        deleteButton.className = 'danger';
+        deleteButton.textContent = 'Delete';
+        deleteButton.addEventListener('click', () => deleteVideo(videoUrl));
+        info.append(deleteButton);
+      }
+
+      card.append(player, info);
+      return card;
+    }
+
+    async function loadVideos() {
+      try {
+        const response = await fetch('/videos');
+        if (!response.ok) {
+          throw new Error('Could not load videos.');
+        }
+
+        const videos = await response.json();
+        videoGrid.replaceChildren(...videos.map(createVideoCard));
+        emptyState.hidden = videos.length > 0;
+      } catch (error) {
+        showMessage(error.message, true);
+      }
+    }
+
+    async function deleteVideo(videoUrl) {
+      if (!window.confirm('Delete this video permanently?')) {
+        return;
+      }
+
+      try {
+        const response = await fetch(videoUrl, {
+          method: 'DELETE',
+          headers: ownerHeaders()
+        });
+        const result = await response.json();
+
+        if (!response.ok) {
+          throw new Error(result.error || 'Could not delete the video.');
+        }
+
+        showMessage('Video deleted.');
+        await loadVideos();
+      } catch (error) {
+        showMessage(error.message, true);
+      }
+    }
+
+    ownerForm.addEventListener('submit', async (event) => {
+      event.preventDefault();
+      const candidate = ownerKeyInput.value.trim();
+
+      if (!candidate) {
+        showMessage('Enter the owner key.', true);
+        return;
+      }
+
+      try {
+        const response = await fetch('/owner/verify', {
+          headers: { 'X-Owner-Key': candidate }
+        });
+
+        if (!response.ok) {
+          throw new Error('That owner key is incorrect.');
+        }
+
+        ownerKey = candidate;
+        sessionStorage.setItem('ownerKey', ownerKey);
+        ownerKeyInput.value = '';
+        setOwnerMode(true);
+        showMessage('Owner mode enabled.');
+        await loadVideos();
+      } catch (error) {
+        showMessage(error.message, true);
+      }
+    });
+
+    lockOwnerButton.addEventListener('click', () => {
+      ownerKey = '';
+      sessionStorage.removeItem('ownerKey');
+      setOwnerMode(false);
+      showMessage('Owner mode disabled.');
+      loadVideos();
+    });
+
+    chooseVideoButton.addEventListener('click', () => {
+      videoInput.click();
+    });
+
+    videoInput.addEventListener('change', async (event) => {
+      const files = Array.from(event.target.files);
+      event.target.value = '';
+
+      if (!ownerKey || files.length === 0) {
+        return;
+      }
+
+      chooseVideoButton.disabled = true;
+      showMessage(`Uploading ${files.length} video${files.length === 1 ? '' : 's'}...`);
+
+      try {
+        for (const file of files) {
+          const formData = new FormData();
+          formData.append('video', file);
+
+          const response = await fetch('/upload', {
+            method: 'POST',
+            headers: ownerHeaders(),
+            body: formData
+          });
+          const result = await response.json();
+
+          if (!response.ok) {
+            throw new Error(result.error || 'Upload failed.');
+          }
+        }
+
+        showMessage('Video upload complete.');
+        await loadVideos();
+      } catch (error) {
+        showMessage(error.message, true);
+      } finally {
+        chooseVideoButton.disabled = false;
+      }
+    });
+
+    async function initialize() {
+      if (ownerKey) {
+        const response = await fetch('/owner/verify', { headers: ownerHeaders() });
+        if (!response.ok) {
+          ownerKey = '';
+          sessionStorage.removeItem('ownerKey');
+        }
+      }
+
+      setOwnerMode(Boolean(ownerKey));
+      await loadVideos();
+    }
+
+    initialize();
+  </script>
+</body>
+</html>
