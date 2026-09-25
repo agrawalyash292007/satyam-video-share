@@ -172,6 +172,25 @@ app.get('/owner/verify', ownerOnly, (req, res) => {
   res.json({ success: true });
 });
 
+app.get('/owner/storage-status', ownerOnly, async (req, res) => {
+  if (!useSupabase) {
+    return res.json({ mode: 'local', ok: true });
+  }
+
+  const { error } = await supabase.storage.from(supabaseBucket).list('', { limit: 1 });
+
+  if (error) {
+    return res.status(500).json({
+      mode: 'supabase',
+      bucket: supabaseBucket,
+      ok: false,
+      error: error.message
+    });
+  }
+
+  res.json({ mode: 'supabase', bucket: supabaseBucket, ok: true });
+});
+
 app.post('/upload', ownerOnly, upload, async (req, res, next) => {
   if (!req.file) {
     return res.status(400).json({ error: 'Choose a video to upload.' });
