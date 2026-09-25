@@ -6,7 +6,7 @@ const os = require('os');
 const path = require('path');
 
 const app = express();
-const appVersion = '2026-09-26.3';
+const appVersion = '2026-09-26.4';
 const port = Number(process.env.PORT) || 3000;
 const ownerKey = process.env.OWNER_KEY;
 const supabaseUrl = process.env.SUPABASE_URL;
@@ -44,8 +44,13 @@ if (process.env.NODE_ENV === 'production' && !useSupabase) {
 
 const newFormatKeyPrefixes = ['sb_secret_', 'sb_publishable_'];
 
-function isNewFormatKey(key) {
-  return newFormatKeyPrefixes.some((prefix) => key.startsWith(prefix));
+function isJwtShaped(key) {
+  if (typeof key !== 'string' || !key) {
+    return false;
+  }
+
+  const parts = key.split('.');
+  return parts.length === 3 && parts.every((part) => /^[A-Za-z0-9_-]+$/.test(part));
 }
 
 // Reports the shape of the configured key without ever revealing any of its characters,
@@ -59,54 +64,73 @@ function describeKey(key) {
   if (key.startsWith('sb_secret_')) format = 'sb_secret';
   else if (key.startsWith('sb_publishable_')) format = 'sb_publishable';
   else if (key.startsWith('sb_temp_')) format = 'sb_temp';
-  else if (key.startsWith('eyJ')) format = 'legacy-jwt';
+  else if (isJwtShaped(key)) format = 'legacy-jwt';
 
   return {
     format,
     length: key.length,
     hasSurroundingWhitespace: key !== key.trim(),
-    hasQuoteCharacters: /^["'].*["']$/.test(key) || key.includes('"') || key.includes("'"),
+    hasQuoteCharacters: key.includes('"') || key.includes("'"),
     hasWhitespace: /\s/.test(key)
   };
 }
 
-// New-format Supabase keys (`sb_secret_…`, `sb_publishable_…`) are opaque secrets, not
-// JWTs, so they must only ever travel in the `apikey` header. Sending one as
-// `Authorization: Bearer …` makes the API gateway reject the request with
-// "Invalid Compact JWS". Legacy keys are JWTs and are accepted in both headers.
-function supabaseHeaders(extra) {
-  const headers = { apikey: supabaseKey, ...extra };
+const supabaseOrigin = supabaseUrl ? supabaseUrl.replace(/\/+$/, '') : null;
 
-  if (!isNewFormatKey(supabaseKey)) {
+// A key can authenticate in two different ways. Legacy `service_role` keys are JWTs, so
+// they are accepted as `Authorization: Bearer …`. New opaque keys (`sb_secret_…`) are
+// rejected as a bearer token with "Invalid Compact JWS" and must travel in `apikey` only.
+// Rather than guess from the string shape, try the likely style first and fall back to the
+// other one on a 401/403, then remember whichever style worked for later requests.
+let preferredAuthStyle = isJwtShaped(supabaseKey) ? 'bearer' : 'apikey-only';
+let resolvedAuthStyle = null;
+
+function buildSupabaseInit(method, endpoint, options, style) {
+  const headers = { apikey: supabaseKey, ...options.headers };
+
+  if (style === 'bearer') {
     headers.Authorization = `Bearer ${supabaseKey}`;
   }
 
-  return headers;
+  return {
+    method,
+    headers,
+    body: options.body,
+    cache: 'no-store'
+  };
 }
 
 async function supabaseRequest(method, endpoint, options = {}) {
-  const response = await fetch(`${supabaseOrigin}${endpoint}`, {
-    method,
-    headers: supabaseHeaders(options.headers),
-    body: options.body
-  });
+  const url = `${supabaseOrigin}${endpoint}`;
+  const styles = resolvedAuthStyle
+    ? [resolvedAuthStyle]
+    : [preferredAuthStyle, preferredAuthStyle === 'bearer' ? 'apikey-only' : 'bearer'];
 
-  if (!response.ok) {
-    const detail = await response.text().catch(() => '');
-    const error = new Error(detail || `${response.status} ${response.statusText}`);
+  let lastError;
+
+  for (const style of styles) {
+    const response = await fetch(url, buildSupabaseInit(method, endpoint, options, style));
+    const text = response.ok ? await response.text() : await response.text().catch(() => '');
+
+    if (response.ok) {
+      resolvedAuthStyle = style;
+      if (resolvedAuthStyle !== preferredAuthStyle) {
+        console.log(`Supabase auth style resolved to "${style}" for this key format.`);
+      }
+      return options.raw || !text ? text : JSON.parse(text);
+    }
+
+    const error = new Error(text || `${response.status} ${response.statusText}`);
     error.status = response.status;
-    throw error;
+    lastError = error;
+
+    if (response.status !== 401 && response.status !== 403) {
+      break;
+    }
   }
 
-  if (options.raw) {
-    return response.text();
-  }
-
-  const text = await response.text();
-  return text ? JSON.parse(text) : null;
+  throw lastError;
 }
-
-const supabaseOrigin = supabaseUrl ? supabaseUrl.replace(/\/+$/, '') : null;
 
 function publicVideoUrl(name) {
   return `${supabaseOrigin}/storage/v1/object/public/${supabaseBucket}/${encodeURIComponent(name)}`;
@@ -256,7 +280,7 @@ app.get('/owner/storage-status', ownerOnly, async (req, res) => {
     return res.status(500).json({ ...config, ok: false, error: error.message });
   }
 
-  res.json({ ...config, ok: true });
+  res.json({ ...config, authStyle: resolvedAuthStyle, ok: true });
 });
 
 app.post('/upload', ownerOnly, upload, async (req, res, next) => {
