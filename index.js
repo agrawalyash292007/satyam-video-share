@@ -7,6 +7,7 @@ const path = require('path');
 const { createClient } = require('@supabase/supabase-js');
 
 const app = express();
+const appVersion = '2026-09-26.2';
 const port = Number(process.env.PORT) || 3000;
 const ownerKey = process.env.OWNER_KEY;
 const supabaseUrl = process.env.SUPABASE_URL;
@@ -46,6 +47,28 @@ const newFormatKeyPrefixes = ['sb_secret_', 'sb_publishable_'];
 
 function isNewFormatKey(key) {
   return newFormatKeyPrefixes.some((prefix) => key.startsWith(prefix));
+}
+
+// Reports the shape of the configured key without ever revealing any of its characters,
+// so a mis-pasted credential can be diagnosed from the outside.
+function describeKey(key) {
+  if (!key) {
+    return { format: 'missing', length: 0 };
+  }
+
+  let format = 'unrecognized';
+  if (key.startsWith('sb_secret_')) format = 'sb_secret';
+  else if (key.startsWith('sb_publishable_')) format = 'sb_publishable';
+  else if (key.startsWith('sb_temp_')) format = 'sb_temp';
+  else if (key.startsWith('eyJ')) format = 'legacy-jwt';
+
+  return {
+    format,
+    length: key.length,
+    hasSurroundingWhitespace: key !== key.trim(),
+    hasQuoteCharacters: /^["'].*["']$/.test(key) || key.includes('"') || key.includes("'"),
+    hasWhitespace: /\s/.test(key)
+  };
 }
 
 // supabase-js falls back to `Authorization: Bearer <api key>` whenever there is no
@@ -198,26 +221,29 @@ async function removeVideo(filename) {
 }
 
 app.get('/owner/verify', ownerOnly, (req, res) => {
-  res.json({ success: true });
+  res.json({ success: true, version: appVersion });
 });
 
 app.get('/owner/storage-status', ownerOnly, async (req, res) => {
   if (!useSupabase) {
-    return res.json({ mode: 'local', ok: true });
+    return res.json({ version: appVersion, mode: 'local', ok: true });
   }
+
+  const config = {
+    version: appVersion,
+    mode: 'supabase',
+    url: supabaseUrl,
+    bucket: supabaseBucket,
+    key: describeKey(supabaseKey)
+  };
 
   const { error } = await supabase.storage.from(supabaseBucket).list('', { limit: 1 });
 
   if (error) {
-    return res.status(500).json({
-      mode: 'supabase',
-      bucket: supabaseBucket,
-      ok: false,
-      error: error.message
-    });
+    return res.status(500).json({ ...config, ok: false, error: error.message });
   }
 
-  res.json({ mode: 'supabase', bucket: supabaseBucket, ok: true });
+  res.json({ ...config, ok: true });
 });
 
 app.post('/upload', ownerOnly, upload, async (req, res, next) => {

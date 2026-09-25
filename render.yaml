@@ -12,7 +12,7 @@ services:
       - key: OWNER_KEY
         sync: false
       - key: SUPABASE_URL
-        sync: false
+        value: https://flddnnyxlyhuorjimsrv.supabase.co
       - key: SUPABASE_SERVICE_ROLE_KEY
         sync: false
       - key: SUPABASE_BUCKET
