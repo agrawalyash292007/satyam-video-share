@@ -10,9 +10,9 @@ const app = express();
 const port = Number(process.env.PORT) || 3000;
 const ownerKey = process.env.OWNER_KEY;
 const supabaseUrl = process.env.SUPABASE_URL;
-const supabaseServiceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+const supabaseKey = process.env.SUPABASE_SECRET_KEY || process.env.SUPABASE_SERVICE_ROLE_KEY;
 const supabaseBucket = process.env.SUPABASE_BUCKET || 'videos';
-const useSupabase = Boolean(supabaseUrl && supabaseServiceRoleKey);
+const useSupabase = Boolean(supabaseUrl && supabaseKey);
 const localUploadsDirectory = path.join(__dirname, 'uploads');
 const temporaryUploadDirectory = path.join(os.tmpdir(), 'satyam-video-uploads');
 const publicDirectory = path.join(__dirname, 'public');
@@ -32,24 +32,53 @@ if (!ownerKey || ownerKey.length < 16) {
   process.exit(1);
 }
 
-if (Boolean(supabaseUrl) !== Boolean(supabaseServiceRoleKey)) {
-  console.error('Set both SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY, or leave both unset for local storage.');
+if (Boolean(supabaseUrl) !== Boolean(supabaseKey)) {
+  console.error('Set both SUPABASE_URL and SUPABASE_SECRET_KEY (or SUPABASE_SERVICE_ROLE_KEY), or leave both unset for local storage.');
   process.exit(1);
 }
 
 if (process.env.NODE_ENV === 'production' && !useSupabase) {
-  console.error('Production requires SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY.');
+  console.error('Production requires SUPABASE_URL and SUPABASE_SECRET_KEY (or SUPABASE_SERVICE_ROLE_KEY).');
   process.exit(1);
+}
+
+const newFormatKeyPrefixes = ['sb_secret_', 'sb_publishable_'];
+
+function isNewFormatKey(key) {
+  return newFormatKeyPrefixes.some((prefix) => key.startsWith(prefix));
+}
+
+// supabase-js falls back to `Authorization: Bearer <api key>` whenever there is no
+// user session, which is always the case for this server. Legacy service_role keys are
+// JWTs so that header is valid, but new-format keys (`sb_secret_…`) are opaque secrets,
+// so the API gateway rejects them with "Invalid Compact JWS". Strip that header and let
+// the key travel in the `apikey` header only, which is how new keys authenticate.
+function supabaseFetch(input, init) {
+  if (!isNewFormatKey(supabaseKey)) {
+    return fetch(input, init);
+  }
+
+  const headers = new Headers(init && init.headers);
+
+  if (headers.get('Authorization') === `Bearer ${supabaseKey}`) {
+    headers.delete('Authorization');
+    return fetch(input, { ...init, headers });
+  }
+
+  return fetch(input, init);
 }
 
 fs.mkdirSync(localUploadsDirectory, { recursive: true });
 fs.mkdirSync(temporaryUploadDirectory, { recursive: true });
 
 const supabase = useSupabase
-  ? createClient(supabaseUrl, supabaseServiceRoleKey, {
+  ? createClient(supabaseUrl, supabaseKey, {
     auth: {
       autoRefreshToken: false,
       persistSession: false
+    },
+    global: {
+      fetch: supabaseFetch
     }
   })
   : null;
