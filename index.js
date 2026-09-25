@@ -4,10 +4,9 @@ const fs = require('fs');
 const multer = require('multer');
 const os = require('os');
 const path = require('path');
-const { createClient } = require('@supabase/supabase-js');
 
 const app = express();
-const appVersion = '2026-09-26.2';
+const appVersion = '2026-09-26.3';
 const port = Number(process.env.PORT) || 3000;
 const ownerKey = process.env.OWNER_KEY;
 const supabaseUrl = process.env.SUPABASE_URL;
@@ -71,40 +70,50 @@ function describeKey(key) {
   };
 }
 
-// supabase-js falls back to `Authorization: Bearer <api key>` whenever there is no
-// user session, which is always the case for this server. Legacy service_role keys are
-// JWTs so that header is valid, but new-format keys (`sb_secret_…`) are opaque secrets,
-// so the API gateway rejects them with "Invalid Compact JWS". Strip that header and let
-// the key travel in the `apikey` header only, which is how new keys authenticate.
-function supabaseFetch(input, init) {
+// New-format Supabase keys (`sb_secret_…`, `sb_publishable_…`) are opaque secrets, not
+// JWTs, so they must only ever travel in the `apikey` header. Sending one as
+// `Authorization: Bearer …` makes the API gateway reject the request with
+// "Invalid Compact JWS". Legacy keys are JWTs and are accepted in both headers.
+function supabaseHeaders(extra) {
+  const headers = { apikey: supabaseKey, ...extra };
+
   if (!isNewFormatKey(supabaseKey)) {
-    return fetch(input, init);
+    headers.Authorization = `Bearer ${supabaseKey}`;
   }
 
-  const headers = new Headers(init && init.headers);
+  return headers;
+}
 
-  if (headers.get('Authorization') === `Bearer ${supabaseKey}`) {
-    headers.delete('Authorization');
-    return fetch(input, { ...init, headers });
+async function supabaseRequest(method, endpoint, options = {}) {
+  const response = await fetch(`${supabaseOrigin}${endpoint}`, {
+    method,
+    headers: supabaseHeaders(options.headers),
+    body: options.body
+  });
+
+  if (!response.ok) {
+    const detail = await response.text().catch(() => '');
+    const error = new Error(detail || `${response.status} ${response.statusText}`);
+    error.status = response.status;
+    throw error;
   }
 
-  return fetch(input, init);
+  if (options.raw) {
+    return response.text();
+  }
+
+  const text = await response.text();
+  return text ? JSON.parse(text) : null;
+}
+
+const supabaseOrigin = supabaseUrl ? supabaseUrl.replace(/\/+$/, '') : null;
+
+function publicVideoUrl(name) {
+  return `${supabaseOrigin}/storage/v1/object/public/${supabaseBucket}/${encodeURIComponent(name)}`;
 }
 
 fs.mkdirSync(localUploadsDirectory, { recursive: true });
 fs.mkdirSync(temporaryUploadDirectory, { recursive: true });
-
-const supabase = useSupabase
-  ? createClient(supabaseUrl, supabaseKey, {
-    auth: {
-      autoRefreshToken: false,
-      persistSession: false
-    },
-    global: {
-      fetch: supabaseFetch
-    }
-  })
-  : null;
 
 app.disable('x-powered-by');
 app.use((req, res, next) => {
@@ -162,19 +171,19 @@ const upload = multer({
 
 async function listVideos() {
   if (useSupabase) {
-    const { data, error } = await supabase.storage.from(supabaseBucket).list('', { limit: 1000 });
+    const files = await supabaseRequest(
+      'POST',
+      `/storage/v1/object/list/${encodeURIComponent(supabaseBucket)}`,
+      {
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ prefix: '', limit: 1000 })
+      }
+    );
 
-    if (error) {
-      throw new Error(error.message);
-    }
-
-    return (data || [])
-      .filter((file) => file && isVideoFilename(file.name))
+    return (Array.isArray(files) ? files : [])
+      .filter((file) => file && file.name && isVideoFilename(file.name))
       .sort((first, second) => second.name.localeCompare(first.name, undefined, { numeric: true }))
-      .map((file) => {
-        const { data: publicData } = supabase.storage.from(supabaseBucket).getPublicUrl(file.name);
-        return { name: file.name, url: publicData.publicUrl };
-      });
+      .map((file) => ({ name: file.name, url: publicVideoUrl(file.name) }));
   }
 
   const entries = await fs.promises.readdir(localUploadsDirectory, { withFileTypes: true });
@@ -188,17 +197,16 @@ async function listVideos() {
 
 async function saveVideo(file) {
   if (useSupabase) {
-    const { error } = await supabase.storage.from(supabaseBucket).upload(file.filename, fs.createReadStream(file.path), {
-      contentType: file.mimetype,
-      upsert: false
-    });
+    await supabaseRequest(
+      'POST',
+      `/storage/v1/object/${encodeURIComponent(supabaseBucket)}/${encodeURI(file.filename)}`,
+      {
+        headers: { 'Content-Type': file.mimetype, 'x-upsert': 'false' },
+        body: await fs.promises.readFile(file.path)
+      }
+    );
 
-    if (error) {
-      throw new Error(error.message);
-    }
-
-    const { data: publicData } = supabase.storage.from(supabaseBucket).getPublicUrl(file.filename);
-    return { name: file.filename, url: publicData.publicUrl };
+    return { name: file.filename, url: publicVideoUrl(file.filename) };
   }
 
   const destination = path.join(localUploadsDirectory, file.filename);
@@ -208,12 +216,10 @@ async function saveVideo(file) {
 
 async function removeVideo(filename) {
   if (useSupabase) {
-    const { error } = await supabase.storage.from(supabaseBucket).remove([filename]);
-
-    if (error) {
-      throw new Error(error.message);
-    }
-
+    await supabaseRequest(
+      'DELETE',
+      `/storage/v1/object/${encodeURIComponent(supabaseBucket)}/${encodeURI(filename)}`
+    );
     return;
   }
 
@@ -237,9 +243,16 @@ app.get('/owner/storage-status', ownerOnly, async (req, res) => {
     key: describeKey(supabaseKey)
   };
 
-  const { error } = await supabase.storage.from(supabaseBucket).list('', { limit: 1 });
-
-  if (error) {
+  try {
+    await supabaseRequest(
+      'POST',
+      `/storage/v1/object/list/${encodeURIComponent(supabaseBucket)}`,
+      {
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ prefix: '', limit: 1 })
+      }
+    );
+  } catch (error) {
     return res.status(500).json({ ...config, ok: false, error: error.message });
   }
 
