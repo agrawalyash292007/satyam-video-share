@@ -6,7 +6,7 @@ const os = require('os');
 const path = require('path');
 
 const app = express();
-const appVersion = '2026-09-26.4';
+const appVersion = '2026-09-26.5';
 const port = Number(process.env.PORT) || 3000;
 const ownerKey = process.env.OWNER_KEY;
 const supabaseUrl = process.env.SUPABASE_URL;
@@ -40,6 +40,15 @@ if (Boolean(supabaseUrl) !== Boolean(supabaseKey)) {
 if (process.env.NODE_ENV === 'production' && !useSupabase) {
   console.error('Production requires SUPABASE_URL and SUPABASE_SECRET_KEY (or SUPABASE_SERVICE_ROLE_KEY).');
   process.exit(1);
+}
+
+// A very common copy/paste mistake: the site owner key ends up in the Supabase credential
+// slot. The Storage API needs a real Supabase key, so surface it instead of failing with an
+// opaque "Invalid Compact JWS" from the gateway.
+const supabaseKeyIsOwnerKey = useSupabase && supabaseKey === ownerKey;
+
+if (supabaseKeyIsOwnerKey) {
+  console.error('SUPABASE_SERVICE_ROLE_KEY is set to the same value as OWNER_KEY. Replace it with your Supabase secret key.');
 }
 
 const newFormatKeyPrefixes = ['sb_secret_', 'sb_publishable_'];
@@ -266,6 +275,14 @@ app.get('/owner/storage-status', ownerOnly, async (req, res) => {
     bucket: supabaseBucket,
     key: describeKey(supabaseKey)
   };
+
+  if (supabaseKeyIsOwnerKey) {
+    return res.status(500).json({
+      ...config,
+      ok: false,
+      error: 'SUPABASE_SERVICE_ROLE_KEY is set to the same value as OWNER_KEY. Replace it with your Supabase secret key.'
+    });
+  }
 
   try {
     await supabaseRequest(
